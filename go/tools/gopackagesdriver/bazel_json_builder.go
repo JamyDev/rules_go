@@ -16,13 +16,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type BazelJSONBuilder struct {
@@ -149,6 +153,12 @@ func (b *BazelJSONBuilder) query(ctx context.Context, query string) ([]string, e
 }
 
 func (b *BazelJSONBuilder) Build(ctx context.Context, mode LoadMode) ([]string, error) {
+	outDir, err := ioutil.TempDir("", "pkgJson")
+	if err != nil {
+		return nil, fmt.Errorf("tmpdir create failed: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr, "Tmpdir for pkgJson: "+outDir)
 	labels, err := b.query(ctx, b.queryFromRequests(b.requests...))
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
@@ -160,42 +170,64 @@ func (b *BazelJSONBuilder) Build(ctx context.Context, mode LoadMode) ([]string, 
 
 	aspects := append(additionalAspects, goDefaultAspect)
 
-	buildArgs := concatStringsArrays([]string{
-		"--experimental_convenience_symlinks=ignore",
-		"--ui_event_filters=-info,-stderr",
-		"--noshow_progress",
-		"--aspects=" + strings.Join(aspects, ","),
-		"--output_groups=" + b.outputGroupsForMode(mode),
-		"--keep_going", // Build all possible packages
-	}, bazelBuildFlags)
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(labels), func(i, j int) { labels[i], labels[j] = labels[j], labels[i] })
 
-	if len(labels) < 100 {
-		buildArgs = append(buildArgs, labels...)
-	} else {
-		// To avoid hitting MAX_ARGS length, write labels to a file and use `--target_pattern_file`
-		targetsFile, err := ioutil.TempFile("", "gopackagesdriver_targets_")
-		if err != nil {
-			return nil, fmt.Errorf("unable to create target pattern file: %w", err)
-		}
-		targetsFile.WriteString(strings.Join(labels, "\n"))
-		defer func() {
-			targetsFile.Close()
-			os.Remove(targetsFile.Name())
-		}()
-
-		buildArgs = append(buildArgs, "--target_pattern_file="+targetsFile.Name())
-	}
-	files, err := b.bazel.Build(ctx, buildArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to bazel build %v: %w", buildArgs, err)
-	}
-
+	var completed []string
 	ret := []string{}
-	for _, f := range files {
-		if strings.HasSuffix(f, ".pkg.json") {
-			ret = append(ret, f)
+	lenLabels := len(labels)
+	defer fmt.Fprintf(os.Stderr, "Defer finished\n")
+	for len(completed) < lenLabels {
+		i := len(completed)
+		n := i+5000
+		if n >= lenLabels {
+			n = lenLabels
 		}
+		fmt.Fprintf(os.Stderr, "Completed %d/%d (%f%%); slicing %d:%d\n", i, lenLabels, float32(i)/float32(lenLabels)*100, i, n)
+		slc := labels[i:n]
+
+		buildArgs := concatStringsArrays([]string{
+			"--experimental_convenience_symlinks=ignore",
+			"--ui_event_filters=-info,-stderr,-warning,-debug",
+			"--noshow_progress",
+			"--aspects=" + strings.Join(aspects, ","),
+			"--output_groups=" + b.outputGroupsForMode(mode),
+			"--keep_going", // Build all possible packages
+		}, bazelBuildFlags)
+
+		if len(slc) < 100 {
+			buildArgs = append(buildArgs, slc...)
+		} else {
+			// To avoid hitting MAX_ARGS length, write slc to a file and use `--target_pattern_file`
+			targetsFile, err := ioutil.TempFile("", "gopackagesdriver_targets_")
+			if err != nil {
+				return nil, fmt.Errorf("unable to create target pattern file: %w", err)
+			}
+			targetsFile.WriteString(strings.Join(slc, "\n"))
+			defer func() {
+				targetsFile.Close()
+				os.Remove(targetsFile.Name())
+			}()
+
+			buildArgs = append(buildArgs, "--target_pattern_file="+targetsFile.Name())
+		}
+		files, err := b.bazel.Build(ctx, buildArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("unable to bazel build %v: %w", buildArgs, err)
+		}
+
+		for _, f := range files {
+			if strings.HasSuffix(f, ".pkg.json") {
+				sum := sha256.Sum256([]byte(f))
+				destFile := filepath.Join(outDir, hex.EncodeToString(sum[:])+".pkg.json")
+				CopyFile(f, destFile)
+				ret = append(ret, destFile)
+			}
+		}
+		completed = append(completed, slc...)
 	}
+
+	fmt.Fprintf(os.Stderr, "Finished %d/%d (%f%%)\n", len(completed), lenLabels, float32(len(completed))/float32(lenLabels)*100)
 
 	return ret, nil
 }
@@ -207,4 +239,15 @@ func (b *BazelJSONBuilder) PathResolver() PathResolverFunc {
 		p = strings.Replace(p, "__BAZEL_OUTPUT_BASE__", b.bazel.OutputBase(), 1)
 		return p
 	}
+}
+
+func CopyFile(src, dest string) error {
+	bytesRead, err := ioutil.ReadFile(src)
+
+    if err != nil {
+        return err
+    }
+
+    err = ioutil.WriteFile(dest, bytesRead, 0644)
+	return err
 }
