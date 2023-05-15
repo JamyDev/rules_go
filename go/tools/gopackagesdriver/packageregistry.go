@@ -92,7 +92,7 @@ func (pr *PackageRegistry) Match(patterns ...string) ([]string, []*FlatPackage) 
 	for _, pattern := range patterns {
 		if pattern == "." || pattern == "./..." {
 			for _, pkg := range pr.packagesByImportPath {
-				if strings.HasPrefix(pkg.ID, "//") {
+				if strings.HasPrefix(pkg.ID, "@//") {
 					roots[pkg.ID] = struct{}{}
 				}
 			}
