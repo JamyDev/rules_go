@@ -27,6 +27,7 @@ GoPkgInfo = provider()
 DEPS_ATTRS = [
     "deps",
     "embed",
+    "plugins",
 ]
 
 PROTO_COMPILER_ATTRS = [
