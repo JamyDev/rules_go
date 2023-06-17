@@ -15,7 +15,7 @@ go_library(
         "utils.go",
     ],
     importpath = "github.com/bazelbuild/rules_go/go/tools/gopackagesdriver",
-    visibility = ["//visibility:private"],
+    visibility = ["//visibility:public"],
 )
 
 go_binary(
